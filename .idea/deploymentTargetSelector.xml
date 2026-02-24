@@ -4,7 +4,7 @@
     <selectionStates>
       <SelectionState runConfigName="九号LSPosed插件">
         <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2026-02-24T08:48:11.877833500Z">
+        <DropdownSelection timestamp="2026-02-24T12:19:58.224276600Z">
           <Target type="DEFAULT_BOOT">
             <handle>
               <DeviceId pluginId="PhysicalDevice" identifier="serial=1554eb86" />
