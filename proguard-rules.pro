@@ -1,0 +1,1 @@
+-dontwarn de.robv.android.xposed.**

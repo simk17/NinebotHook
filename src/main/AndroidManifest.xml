@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <queries>
+        <package android:name="cn.ninebot.ninebot" />
+    </queries>
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage" />
+    <application
+        android:allowBackup="true"
+        android:label="Ninebot LSPosed"
+        android:icon="@android:drawable/ic_menu_compass"
+        android:supportsRtl="true"
+        android:requestLegacyExternalStorage="true">
+        <provider
+            android:name=".ConfigProvider"
+            android:authorities="com.ninebot.hook.config"
+            android:exported="true" />
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="Ninebot LSPosed Module" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="93" />
+        <meta-data
+            android:name="xposedapi"
+            android:value="82" />
+        <!-- LSPosed 93+???? MODE_WORLD_READABLE ? SharedPreferences?????? XSharedPreferences ?????????? -->
+        <meta-data
+            android:name="xposedsharedprefs"
+            android:value="theme_config" />
+    </application>
+</manifest>
