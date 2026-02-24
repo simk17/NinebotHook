@@ -46,9 +46,23 @@ public class NinebotHook implements IXposedHookLoadPackage {
         sPrefs.makeWorldReadable();
     }
 
-    private static boolean isThemeHackEnabled() {
+    /** 1. 强制开启内测主题功能（themeShow、内存、Tab、入口） */
+    private static boolean isThemeShowEnabled() {
         sPrefs.reload();
+        if (sPrefs.contains("enable_theme_show")) return sPrefs.getBoolean("enable_theme_show", true);
         return sPrefs.getBoolean("enable_theme_hack", true);
+    }
+    /** 2. 破解主题费用（已拥有/72057/device/resource/我的主题库） */
+    private static boolean isThemeCrackPaidEnabled() {
+        sPrefs.reload();
+        if (sPrefs.contains("enable_theme_crack_paid")) return sPrefs.getBoolean("enable_theme_crack_paid", true);
+        return sPrefs.getBoolean("enable_theme_hack", true);
+    }
+    /** 3. 其他：抓包、水印、反调试 */
+    private static boolean isOtherEnabled() {
+        sPrefs.reload();
+        if (sPrefs.contains("enable_other")) return sPrefs.getBoolean("enable_other", true);
+        return true;
     }
 
     private static String getRemoteServerUrl() {
@@ -72,7 +86,7 @@ public class NinebotHook implements IXposedHookLoadPackage {
         try {
             sPrefs.reload();
             boolean canReadServer = !getRemoteServerUrl().isEmpty();
-            ReportHelper.reportSync("配置检查", V("读取测试 -> 主题开关: " + isThemeHackEnabled() + " | 服务器配置: " + (canReadServer ? "正常" : "未设置/无法读取")));
+            ReportHelper.reportSync("配置检查", V("主题显示=" + isThemeShowEnabled() + " 破解费用=" + isThemeCrackPaidEnabled() + " 其他=" + isOtherEnabled() + " | 服务器=" + (canReadServer ? "正常" : "未设置")));
         } catch (Throwable t) {
             ReportHelper.reportSync("配置检查", V("异常: " + t.getMessage()));
         }
@@ -124,7 +138,7 @@ public class NinebotHook implements IXposedHookLoadPackage {
             XposedBridge.hookAllMethods(clazz, "customizeOkHttpClient2", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
-                    injectInterceptor(param, loader);
+                    if (isOtherEnabled()) injectInterceptor(param, loader);
                 }
             });
             hookedRetrofit = true;
@@ -151,20 +165,20 @@ public class NinebotHook implements IXposedHookLoadPackage {
             XposedBridge.hookAllMethods(clazz, "decodeContent", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    if (!isThemeHackEnabled()) return;
+                    if (!isThemeShowEnabled() && !isThemeCrackPaidEnabled()) return;
                     String decrypted = (String) param.getResult();
                     if (decrypted == null) return;
                     String modified = decrypted;
                     boolean changed = false;
-                    // 1. 云控入口：themeShow 控制是否显示主题 Tab
-                    if (modified.contains("themeShow")) {
+                    // 1. 云控入口：themeShow 控制是否显示主题 Tab（仅「主题显示」开关）
+                    if (isThemeShowEnabled() && modified.contains("themeShow")) {
                         modified = modified.replaceAll("\"themeShow\":\\s*[0-9]+", "\"themeShow\":1");
                         changed = true;
                     }
-                    // 2. 付费/已拥有：仅当响应疑似主题相关时才改（含 batch-show-config / getEraseResourceInfo 等）
+                    // 2. 付费/已拥有 等（仅「破解费用」开关）
                     boolean looksTheme = modified.contains("theme") || modified.contains("themeId") || modified.contains("skin")
                             || modified.contains("showEntranceList") || modified.contains("eraseResource") || modified.contains("EraseResource");
-                    if (looksTheme) {
+                    if (isThemeCrackPaidEnabled() && looksTheme) {
                         if (modified.contains("owned")) {
                             String next = modified.replaceAll("\"owned\":\\s*0", "\"owned\":1");
                             if (!next.equals(modified)) { modified = next; changed = true; }
@@ -327,8 +341,8 @@ public class NinebotHook implements IXposedHookLoadPackage {
                             ReportHelper.report("主题破解", V("device/resource 已注入 APP 皮肤项，首页应显示主题背景"));
                         }
                     }
-                    // 主题相关响应：输出解包内容到日志，便于找云控参数（最新/人气、仪表APP、单价、划线价等）
-                    if (looksTheme) {
+                    // 主题相关响应：输出解包内容到日志（任一主题开关开启时）
+                    if ((isThemeShowEnabled() || isThemeCrackPaidEnabled()) && looksTheme) {
                         String toLog = decrypted.length() > DECRYPT_LOG_MAX
                                 ? decrypted.substring(0, DECRYPT_LOG_MAX) + "\n...（截断，共 " + decrypted.length() + " 字）"
                                 : decrypted;
@@ -366,7 +380,7 @@ public class NinebotHook implements IXposedHookLoadPackage {
             XposedBridge.hookAllMethods(clazz, "getTopGuideTabConfig", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    if (!isThemeHackEnabled()) return;
+                    if (!isThemeShowEnabled()) return;
                     Object config = param.getResult();
                     if (config != null) {
                         XposedHelpers.setIntField(config, "themeShow", 1);
@@ -390,7 +404,7 @@ public class NinebotHook implements IXposedHookLoadPackage {
             XposedBridge.hookAllMethods(clazz, "updateTabList", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
-                    if (!isThemeHackEnabled()) return;
+                    if (!isThemeShowEnabled()) return;
                     List tabs = (List) param.args[0];
                     try {
                         Class<?> tabClass = XposedHelpers.findClass("cn.ninebot.device.topguide.TopGuideTab", loader);
@@ -416,7 +430,7 @@ public class NinebotHook implements IXposedHookLoadPackage {
             XposedBridge.hookAllMethods(clazz, "isUseTopGuideMode", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    if (isThemeHackEnabled()) param.setResult(true);
+                    if (isThemeShowEnabled()) param.setResult(true);
                 }
             });
             hookedEntry = true;
@@ -455,7 +469,7 @@ public class NinebotHook implements IXposedHookLoadPackage {
             XposedBridge.hookAllMethods(Debug.class, "isDebuggerConnected", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    param.setResult(false);
+                    if (isOtherEnabled()) param.setResult(false);
                 }
             });
         } catch (Throwable ignored) {}
@@ -469,7 +483,7 @@ public class NinebotHook implements IXposedHookLoadPackage {
                     Context ctx = (Context) param.args[0];
                     if (ctx != null && TARGET_PACKAGE.equals(ctx.getPackageName())) {
                         new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                            Toast.makeText(ctx, "九号LSPosed注入成功 v" + HOOK_LOG_VERSION, Toast.LENGTH_SHORT).show();
+                            Toast.makeText(ctx, "九号出行LSPosed插件 注入成功 v" + HOOK_LOG_VERSION, Toast.LENGTH_SHORT).show();
                         }, 2000);
                     }
                 }
@@ -482,6 +496,7 @@ public class NinebotHook implements IXposedHookLoadPackage {
             XposedBridge.hookAllMethods(Activity.class, "onResume", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
+                    if (!isOtherEnabled()) return;
                     final Activity activity = (Activity) param.thisObject;
                     if (activity.getPackageName().equals(TARGET_PACKAGE)) {
                         new Handler(Looper.getMainLooper()).post(() -> addWatermarkToActivity(activity));

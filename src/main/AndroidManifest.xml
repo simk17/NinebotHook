@@ -12,7 +12,7 @@
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage" />
     <application
         android:allowBackup="true"
-        android:label="Ninebot LSPosed"
+        android:label="九号出行LSPosed插件"
         android:icon="@android:drawable/ic_menu_compass"
         android:supportsRtl="true"
         android:requestLegacyExternalStorage="true">
@@ -31,7 +31,7 @@
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="Ninebot LSPosed Module" />
+            android:value="九号出行 LSPosed 模块" />
         <meta-data
             android:name="xposedminversion"
             android:value="93" />
