@@ -19,6 +19,14 @@ public class HookConfig {
     /** 3. 其他：抓包、水印、反调试等 */
     public static final String KEY_OTHER = "enable_other";
 
+    /** 4. 修改车辆型号：为 true 时 getVehicleType() 返回下方指定 type，实现仪表盘显示时速等 */
+    public static final String KEY_FORCE_MOTOR_DISPLAY = "enable_force_motor_display";
+    /** 强制使用的 vehicleType 值，默认 116 = 九号电动Dz110P */
+    public static final String KEY_FORCE_MOTOR_VEHICLE_TYPE = "force_motor_vehicle_type";
+
+    /** 5. 投屏导航叠加：地图导航投屏时在画面上叠加自定义内容（当前为验证用，后续可定制显示） */
+    public static final String KEY_SCREEN_CAST_OVERLAY = "enable_screen_cast_overlay";
+
     private static SharedPreferences getPrefs(Context context) {
         return context.getSharedPreferences(PREF_NAME, Context.MODE_WORLD_READABLE);
     }
@@ -72,5 +80,31 @@ public class HookConfig {
 
     public static void setOtherEnabled(Context context, boolean enabled) {
         getPrefs(context).edit().putBoolean(KEY_OTHER, enabled).apply();
+    }
+
+    public static boolean isForceMotorDisplayEnabled(Context context) {
+        return getPrefs(context).getBoolean(KEY_FORCE_MOTOR_DISPLAY, false);
+    }
+
+    public static void setForceMotorDisplayEnabled(Context context, boolean enabled) {
+        getPrefs(context).edit().putBoolean(KEY_FORCE_MOTOR_DISPLAY, enabled).apply();
+    }
+
+    /** vehicleType 整型值，默认 116 = 九号电动Dz110P */
+    public static int getForceMotorVehicleType(Context context) {
+        return getPrefs(context).getInt(KEY_FORCE_MOTOR_VEHICLE_TYPE, 116);
+    }
+
+    public static void setForceMotorVehicleType(Context context, int type) {
+        getPrefs(context).edit().putInt(KEY_FORCE_MOTOR_VEHICLE_TYPE, type).apply();
+    }
+
+    /** 默认 true：只要九号 APP 选择「地图导航」投屏就启用叠加（与高德/百度等无关），便于验证；可关闭。 */
+    public static boolean isScreenCastOverlayEnabled(Context context) {
+        return getPrefs(context).getBoolean(KEY_SCREEN_CAST_OVERLAY, true);
+    }
+
+    public static void setScreenCastOverlayEnabled(Context context, boolean enabled) {
+        getPrefs(context).edit().putBoolean(KEY_SCREEN_CAST_OVERLAY, enabled).apply();
     }
 }

@@ -112,6 +112,43 @@ public class MainActivity extends Activity {
         LinearLayout btnCard = cardWrap(horizontalButtonRow(cardPad), cardPad);
         root.addView(btnCard);
 
+        // ---------- 5. 修改车辆型号 ----------
+        root.addView(sectionTitle("5. 修改车辆型号"));
+        root.addView(switchRow(
+                "修改车辆型号实现仪表盘显示时速，默认参数116,为九号电动Dz110P内部编号.",
+                HookConfig.isForceMotorDisplayEnabled(this),
+                (checked) -> {
+                    HookConfig.setForceMotorDisplayEnabled(this, checked);
+                    Toast.makeText(this, checked ? "已开启：修改车辆型号" : "已关闭", Toast.LENGTH_SHORT).show();
+                },
+                cardPad
+        ));
+        TextView motorTypeHint = new TextView(this);
+        motorTypeHint.setText("该值（建议填 116 或抓包「车辆信息」中确认的车型。乱填可能会触发内部开发功能：如 117 会触发「发起导航(体验版)」「仅支持高德自行车」等");
+        motorTypeHint.setTextSize(BODY_SIZE_SP - 2);
+        motorTypeHint.setTextColor(COLOR_SUBTITLE);
+        motorTypeHint.setPadding(cardPad, dp(8), cardPad, dp(4));
+        root.addView(motorTypeHint);
+        EditText editMotorType = new EditText(this);
+        editMotorType.setHint("116");
+        editMotorType.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        editMotorType.setText(String.valueOf(HookConfig.getForceMotorVehicleType(this)));
+        editMotorType.setPadding(cardPad, dp(4), cardPad, dp(8));
+        editMotorType.setTextSize(BODY_SIZE_SP);
+        root.addView(editMotorType);
+
+        // ---------- 6. 投屏导航 ----------
+        root.addView(sectionTitle("6. 投屏导航"));
+        root.addView(switchRow(
+                "地图导航时叠加（仅当导航设为「地图导航」时生效，与高德/百度等无关；当前为验证文案，可关）",
+                HookConfig.isScreenCastOverlayEnabled(this),
+                (checked) -> {
+                    HookConfig.setScreenCastOverlayEnabled(this, checked);
+                    Toast.makeText(this, checked ? "已开启投屏叠加" : "已关闭", Toast.LENGTH_SHORT).show();
+                },
+                cardPad
+        ));
+
         // ---------- 服务器配置 ----------
         root.addView(sectionTitle("Web 日志服务器"));
         TextView hint = new TextView(this);
@@ -141,6 +178,10 @@ public class MainActivity extends Activity {
         btnSave.setOnClickListener(v -> {
             String s = editUrl.getText().toString().trim();
             HookConfig.setServerUrl(this, s);
+            try {
+                int type = Integer.parseInt(editMotorType.getText().toString().trim());
+                HookConfig.setForceMotorVehicleType(this, type);
+            } catch (NumberFormatException ignored) { }
             Toast.makeText(this, "设置已保存，下次 Hook 生效", Toast.LENGTH_SHORT).show();
         });
         root.addView(btnSave);

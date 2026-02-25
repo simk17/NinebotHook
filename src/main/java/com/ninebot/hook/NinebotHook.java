@@ -2,12 +2,16 @@ package com.ninebot.hook;
 
 import android.app.Activity;
 import android.content.Context;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
 import android.os.Debug;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.TextView;
@@ -33,7 +37,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  */
 public class NinebotHook implements IXposedHookLoadPackage {
 
-    private static final int HOOK_LOG_VERSION = 42; 
+    private static final int HOOK_LOG_VERSION = 43; 
     private static String V(String msg) { return msg + " | 插件v" + HOOK_LOG_VERSION; }
 
     private static final String TARGET_PACKAGE = "cn.ninebot.ninebot";
@@ -64,6 +68,20 @@ public class NinebotHook implements IXposedHookLoadPackage {
         if (sPrefs.contains("enable_other")) return sPrefs.getBoolean("enable_other", true);
         return true;
     }
+    /** 4. 修改车辆型号：强制 getVehicleType() 返回指定 type（默认 116 = Dz110P） */
+    private static boolean isForceMotorDisplayEnabled() {
+        sPrefs.reload();
+        return sPrefs.getBoolean("enable_force_motor_display", false);
+    }
+    private static int getForceMotorVehicleType() {
+        sPrefs.reload();
+        return sPrefs.getInt("force_motor_vehicle_type", 116);
+    }
+    /** 5. 投屏导航叠加（单独开关，与「其他」无关） */
+    private static boolean isScreenCastOverlayEnabled() {
+        sPrefs.reload();
+        return sPrefs.getBoolean("enable_screen_cast_overlay", false);
+    }
 
     private static String getRemoteServerUrl() {
         sPrefs.reload();
@@ -86,7 +104,7 @@ public class NinebotHook implements IXposedHookLoadPackage {
         try {
             sPrefs.reload();
             boolean canReadServer = !getRemoteServerUrl().isEmpty();
-            ReportHelper.reportSync("配置检查", V("主题显示=" + isThemeShowEnabled() + " 破解费用=" + isThemeCrackPaidEnabled() + " 其他=" + isOtherEnabled() + " | 服务器=" + (canReadServer ? "正常" : "未设置")));
+            ReportHelper.reportSync("配置检查", V("主题显示=" + isThemeShowEnabled() + " 破解费用=" + isThemeCrackPaidEnabled() + " 其他=" + isOtherEnabled() + " 车辆型号=" + isForceMotorDisplayEnabled() + " | 服务器=" + (canReadServer ? "正常" : "未设置")));
         } catch (Throwable t) {
             ReportHelper.reportSync("配置检查", V("异常: " + t.getMessage()));
         }
@@ -106,18 +124,53 @@ public class NinebotHook implements IXposedHookLoadPackage {
         // 尝试一次性注入
         tryHookAll(loader);
 
-        // 监听后续类加载
+        // 监听后续类加载（MCP 确认：CaptureClient 在 classes17.dex，首屏不会加载）
         XposedBridge.hookAllMethods(ClassLoader.class, "loadClass", new XC_MethodHook() {
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
                 if (param.hasThrowable() || param.getResult() == null) return;
                 Class<?> clazz = (Class<?>) param.getResult();
                 String name = clazz.getName();
-                if (name.contains("ninebot")) {
-                    tryHookAll(loader);
+                try {
+                    // 源码：DeviceApplication.init() 内会引用 CaptureClient.INSTANCE，init 执行时 CaptureClient 已加载
+                    if ("cn.ninebot.device.DeviceApplication".equals(name)) {
+                        ClassLoader targetLoader = (ClassLoader) param.thisObject;
+                        hookDeviceApplicationInitThenScreenCast(clazz, targetLoader);
+                        return;
+                    }
+                    if (name.contains("ninebot") && (name.contains("capture") || name.contains("Capture") || name.contains("screencast") || name.contains("ScreenCast"))) {
+                        ClassLoader targetLoader = (ClassLoader) param.thisObject;
+                        tryHookAll(targetLoader);
+                    } else if (name.contains("ninebot")) {
+                        tryHookAll(loader);
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG_SCREEN_CAST, "loadClass 回调异常", t);
                 }
             }
         });
+    }
+
+    /** MCP 确认：DeviceApplication.init(Context) 中会调用 CaptureClient.INSTANCE.setNotificationCreator，init 执行后 CaptureClient 已加载，用 context 的 ClassLoader 挂投屏 hook */
+    private boolean hookedDeviceApplicationInit = false;
+    private void hookDeviceApplicationInitThenScreenCast(Class<?> deviceAppClass, ClassLoader loader) {
+        if (hookedDeviceApplicationInit) return;
+        try {
+            XposedBridge.hookAllMethods(deviceAppClass, "init", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (param.args == null || param.args.length < 1 || !(param.args[0] instanceof Context)) return;
+                    Context ctx = (Context) param.args[0];
+                    ClassLoader appLoader = ctx.getClass().getClassLoader();
+                    Log.w(TAG_SCREEN_CAST, "DeviceApplication.init 已执行，用 Application ClassLoader 挂投屏 hook");
+                    tryHookScreenCastOverlay(appLoader);
+                }
+            });
+            hookedDeviceApplicationInit = true;
+            Log.w(TAG_SCREEN_CAST, "已挂载 DeviceApplication.init 回调，等待 init 执行后安装投屏 hook");
+        } catch (Throwable t) {
+            Log.e(TAG_SCREEN_CAST, "hook DeviceApplication.init 失败", t);
+        }
     }
 
     private synchronized void tryHookAll(ClassLoader loader) {
@@ -126,6 +179,8 @@ public class NinebotHook implements IXposedHookLoadPackage {
         tryHookMemoryConfig(loader);
         tryHookThemeUI(loader);
         tryHookEntry(loader);
+        tryHookDeviceBeanVehicleType(loader);
+        tryHookScreenCastOverlay(loader);
     }
 
     // 1. 网络抓包
@@ -165,9 +220,13 @@ public class NinebotHook implements IXposedHookLoadPackage {
             XposedBridge.hookAllMethods(clazz, "decodeContent", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    if (!isThemeShowEnabled() && !isThemeCrackPaidEnabled()) return;
                     String decrypted = (String) param.getResult();
                     if (decrypted == null) return;
+                    // 抓包-车辆信息：开启「其他」时，解密后若含 vehicle_type 则明文上报，便于确认 vehicleType 位数与车辆编号
+                    if (isOtherEnabled() && decrypted.contains("vehicle_type")) {
+                        reportVehicleInfoFromDecrypted(decrypted);
+                    }
+                    if (!isThemeShowEnabled() && !isThemeCrackPaidEnabled()) return;
                     String modified = decrypted;
                     boolean changed = false;
                     // 1. 云控入口：themeShow 控制是否显示主题 Tab（仅「主题显示」开关）
@@ -437,6 +496,93 @@ public class NinebotHook implements IXposedHookLoadPackage {
         } catch (Throwable ignored) {}
     }
 
+    // 修改车辆型号：仅影响仪表盘/轨迹等本地展示；上送仍用官方 116（DeviceBean 字段原值）
+    // 调用栈包含以下关键字时视为上送/网络，getVehicleType() 返回官方字段值（116）
+    private static final String[] UPLOAD_STACK_KEYWORDS = new String[]{
+            "retrofit", "okhttp3", "nbnet", "encrypt", "RequestBody", "ApiService", "Interceptor",
+            "network", "NeteaseEncrypt", "encodeContent", "RequestBuilder", "gson", "Gson", "toJson"
+    };
+    private static boolean isLikelyUploadOrNetwork() {
+        try {
+            StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+            for (StackTraceElement e : stack) {
+                String c = e.getClassName();
+                if (c == null) continue;
+                String lower = c.toLowerCase();
+                for (String kw : UPLOAD_STACK_KEYWORDS) {
+                    if (lower.contains(kw.toLowerCase())) return true;
+                }
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    private boolean hookedDeviceBeanVehicleType = false;
+    private void tryHookDeviceBeanVehicleType(ClassLoader loader) {
+        if (hookedDeviceBeanVehicleType) return;
+        try {
+            Class<?> clazz = XposedHelpers.findClassIfExists("cn.ninebot.device.bean.DeviceBean", loader);
+            if (clazz == null) return;
+            XposedBridge.hookAllMethods(clazz, "getVehicleType", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (!isForceMotorDisplayEnabled()) return;
+                    // 真实车型（官方 116 等）：从字段读取，上送/网络相关调用仍返回此值
+                    int realType = 116;
+                    try {
+                        realType = XposedHelpers.getIntField(param.thisObject, "vehicleType");
+                    } catch (Throwable ignored) {}
+                    if (isLikelyUploadOrNetwork()) {
+                        param.setResult(Integer.valueOf(realType));
+                        return;
+                    }
+                    // 本地展示：仪表盘、轨迹等用配置的 type
+                    param.setResult(Integer.valueOf(getForceMotorVehicleType()));
+                }
+            });
+            hookedDeviceBeanVehicleType = true;
+            ReportHelper.reportSync("注入成功", V("已挂载 DeviceBean.getVehicleType（修改车辆型号，上送仍用官方）"));
+        } catch (Throwable ignored) {}
+    }
+
+    /** 从解密后的 JSON 中提取车辆信息并上报，便于在 Web 日志中看到 vehicle_type、车辆编号等（vehicleType 为整数，通常 1～2 位） */
+    private static final int VEHICLE_INFO_MAX_DEVICES = 8;
+    private static final int VEHICLE_INFO_MAX_LEN = 2800;
+    private void reportVehicleInfoFromDecrypted(String decrypted) {
+        try {
+            Matcher vtMatcher = Pattern.compile("\"vehicle_type\"\\s*:\\s*(-?\\d+)").matcher(decrypted);
+            int count = 0;
+            int start = 0;
+            while (vtMatcher.find(start) && count < VEHICLE_INFO_MAX_DEVICES) {
+                String vehicleTypeVal = vtMatcher.group(1);
+                int pos = vtMatcher.start();
+                int windowStart = Math.max(0, pos - 400);
+                int windowEnd = Math.min(decrypted.length(), pos + 1200);
+                String window = decrypted.substring(windowStart, windowEnd);
+                String wnumber = firstGroup(Pattern.compile("\"wnumber\"\\s*:\\s*\"([^\"]*)\"").matcher(window));
+                String devId = firstGroup(Pattern.compile("\"dev_id\"\\s*:\\s*\"([^\"]*)\"").matcher(window));
+                String deviceName = firstGroup(Pattern.compile("\"device_name\"\\s*:\\s*\"([^\"]*)\"").matcher(window));
+                String vehicleNameZh = firstGroup(Pattern.compile("\"vehicle_name_zh\"\\s*:\\s*\"([^\"]*)\"").matcher(window));
+                String andMac = firstGroup(Pattern.compile("\"and_mac\"\\s*:\\s*\"([^\"]*)\"").matcher(window));
+                StringBuilder one = new StringBuilder();
+                one.append("vehicle_type=").append(vehicleTypeVal);
+                if (wnumber != null && !wnumber.isEmpty()) one.append(" wnumber=").append(wnumber);
+                if (devId != null && !devId.isEmpty()) one.append(" dev_id=").append(devId);
+                if (deviceName != null && !deviceName.isEmpty()) one.append(" device_name=").append(deviceName);
+                if (vehicleNameZh != null && !vehicleNameZh.isEmpty()) one.append(" vehicle_name_zh=").append(vehicleNameZh);
+                if (andMac != null && !andMac.isEmpty()) one.append(" mac=").append(andMac);
+                String msg = one.length() > VEHICLE_INFO_MAX_LEN ? one.substring(0, VEHICLE_INFO_MAX_LEN) + "…" : one.toString();
+                ReportHelper.report("车辆信息", msg);
+                count++;
+                start = vtMatcher.end();
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private static String firstGroup(Matcher m) {
+        return m.find() ? m.group(1) : null;
+    }
+
     private void injectInterceptor(XC_MethodHook.MethodHookParam param, ClassLoader loader) {
         try {
             Object builder = param.args[0];
@@ -504,6 +650,140 @@ public class NinebotHook implements IXposedHookLoadPackage {
                 }
             });
         } catch (Throwable ignored) {}
+    }
+
+    /**
+     * 投屏导航：在传入的 view 上包一层并叠加测试层。用满屏 1mm 间距网格线测试分辨率/位置是否被绘制。
+     */
+    private static final int FALLBACK_CAPTURE_WIDTH = 800;
+    private static final int FALLBACK_CAPTURE_HEIGHT = 480;
+
+    /** 满屏 1mm 间距分割线，用于测试车机是否绘制我们叠加的 View、分辨率与位置 */
+    private static final class Grid1mmOverlayView extends View {
+        private final float mmPx;
+        private final Paint linePaint;
+
+        Grid1mmOverlayView(Context ctx) {
+            super(ctx);
+            mmPx = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_MM, 1, ctx.getResources().getDisplayMetrics());
+            linePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            linePaint.setColor(Color.WHITE);
+            linePaint.setStrokeWidth(1f);
+            linePaint.setStyle(Paint.Style.STROKE);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            int w = getWidth();
+            int h = getHeight();
+            if (w <= 0 || h <= 0 || mmPx <= 0) return;
+            for (float x = 0; x <= w; x += mmPx) {
+                canvas.drawLine(x, 0, x, h, linePaint);
+            }
+            for (float y = 0; y <= h; y += mmPx) {
+                canvas.drawLine(0, y, w, y, linePaint);
+            }
+        }
+    }
+
+    /** 包装原 view，上层叠加满屏 1mm 网格线（测试用） */
+    private static View wrapCaptureViewWithOverlay(View original, int width, int height) {
+        if (width <= 0) width = FALLBACK_CAPTURE_WIDTH;
+        if (height <= 0) height = FALLBACK_CAPTURE_HEIGHT;
+        Context ctx = original.getContext();
+        FrameLayout wrapper = new FrameLayout(ctx);
+        wrapper.setLayoutParams(new FrameLayout.LayoutParams(width, height));
+        wrapper.addView(original, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        View gridOverlay = new Grid1mmOverlayView(ctx);
+        wrapper.addView(gridOverlay, new FrameLayout.LayoutParams(width, height));
+        try {
+            wrapper.measure(
+                    View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY));
+            wrapper.layout(0, 0, width, height);
+        } catch (Throwable ignored) {}
+        return wrapper;
+    }
+
+    private static final String TAG_SCREEN_CAST = "NinebotHook/投屏";
+
+    private boolean hookedScreenCastOverlay = false;
+    private void tryHookScreenCastOverlay(ClassLoader loader) {
+        if (hookedScreenCastOverlay) return;
+        Log.i("NinebotHook", "[投屏] tryHookScreenCastOverlay 被调用 loader=" + (loader != null ? loader.getClass().getName() : "null"));
+        Log.w(TAG_SCREEN_CAST, "tryHookScreenCastOverlay 被调用 loader=" + (loader != null ? loader.getClass().getName() : "null"));
+        try {
+            // 入口：真正被编码投屏的是 createCapture 传入的 view，必须在此处包装
+            Class<?> captureClient = XposedHelpers.findClassIfExists("cn.ninebot.capture.CaptureClient", loader);
+            if (captureClient == null) {
+                Log.w(TAG_SCREEN_CAST, "CaptureClient 未找到(cn.ninebot.capture.CaptureClient)，投屏 hook 未安装。若你的是其它版本请用 JADX 查实际类名。");
+                return;
+            }
+            XposedBridge.hookAllMethods(captureClient, "createCapture", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    if (!isScreenCastOverlayEnabled()) return;
+                    if (param.args == null || param.args.length < 5) return;
+                    View original = param.args[2] instanceof View ? (View) param.args[2] : null;
+                    if (original == null) return;
+                    int w = param.args[3] instanceof Integer ? (Integer) param.args[3] : 0;
+                    int h = param.args[4] instanceof Integer ? (Integer) param.args[4] : 0;
+                    if (w <= 0 || h <= 0) {
+                        ViewGroup.LayoutParams lp = original.getLayoutParams();
+                        if (lp != null) { w = lp.width; h = lp.height; }
+                    }
+                    param.args[2] = wrapCaptureViewWithOverlay(original, w, h);
+                    String msg = "createCapture 已调用 w=" + w + " h=" + h + " 已包装叠加";
+                    Log.w(TAG_SCREEN_CAST, msg);
+                    ReportHelper.reportSync("投屏", msg);
+                }
+            });
+            Log.w(TAG_SCREEN_CAST, "createCapture 已挂载，开始导航后应出现本条及「createCapture 已调用」");
+            // 备用：replaceView 也强制替换为仅提示语
+            Class<?> wrapperClazz = XposedHelpers.findClassIfExists("cn.ninebot.capture.CaptureClient$CaptureControllerWrapper", loader);
+            if (wrapperClazz != null) {
+                Log.w(TAG_SCREEN_CAST, "replaceView 已挂载");
+                XposedBridge.hookAllMethods(wrapperClazz, "replaceView", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!isScreenCastOverlayEnabled()) return;
+                        View original = param.args[0] instanceof View ? (View) param.args[0] : null;
+                        if (original == null) return;
+                        ViewGroup.LayoutParams lp = original.getLayoutParams();
+                        int w = lp != null ? lp.width : 0;
+                        int h = lp != null ? lp.height : 0;
+                        param.args[0] = wrapCaptureViewWithOverlay(original, w, h);
+                    }
+                });
+            }
+            // Service 侧：createCodecCapture/createMpeg2Capture 为 native 实现，在此替换 view 确保进入 native 的是我们的 View
+            Class<?> captureService = XposedHelpers.findClassIfExists("cn.ninebot.capture.CaptureService", loader);
+            if (captureService != null) {
+                Log.w(TAG_SCREEN_CAST, "CaptureService 已找到，挂载 createCodecCapture/createMpeg2Capture");
+                for (String methodName : new String[]{"createCodecCapture", "createMpeg2Capture"}) {
+                    try {
+                        XposedBridge.hookAllMethods(captureService, methodName, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                if (!isScreenCastOverlayEnabled()) return;
+                                if (param.args == null || param.args.length < 3) return;
+                                View original = param.args[0] instanceof View ? (View) param.args[0] : null;
+                                if (original == null) return;
+                                int w = param.args[1] instanceof Integer ? (Integer) param.args[1] : 0;
+                                int h = param.args[2] instanceof Integer ? (Integer) param.args[2] : 0;
+                                param.args[0] = wrapCaptureViewWithOverlay(original, w, h);
+                            }
+                        });
+                    } catch (Throwable t) { /* method may not exist */ }
+                }
+            }
+            hookedScreenCastOverlay = true;
+            Log.w(TAG_SCREEN_CAST, "投屏 hook 全部挂载完成，请开始「地图导航」投屏后查看是否出现 createCapture 已调用");
+            ReportHelper.reportSync("注入成功", V("已挂载投屏 强制替换为仅提示语（Client+Service）"));
+        } catch (Throwable t) {
+            Log.e(TAG_SCREEN_CAST, "投屏 hook 安装失败", t);
+        }
     }
 
     private void addWatermarkToActivity(Activity activity) {
