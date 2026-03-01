@@ -19,6 +19,7 @@ import android.widget.Toast;
 
 import java.lang.reflect.Proxy;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -30,19 +31,16 @@ import de.robv.android.xposed.XSharedPreferences;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * 九号LSPosed插件 - v41 终极修复版
- * 1. 修正配置文件名为 theme_config (与 Manifest 一致)
- * 2. 强化延迟加载逻辑，解决 ClassNotFound
- * 3. 恢复内存层配置篡改，确保主题显示
+ * 九号出行LSPosed插件
  */
 public class NinebotHook implements IXposedHookLoadPackage {
 
-    private static final int HOOK_LOG_VERSION = 43; 
+    private static final int HOOK_LOG_VERSION = 48; 
     private static String V(String msg) { return msg + " | 插件v" + HOOK_LOG_VERSION; }
 
     private static final String TARGET_PACKAGE = "cn.ninebot.ninebot";
     private static final String MODULE_PACKAGE = "com.ninebot.hook";
-    
+
     // 修正：必须与 HookConfig 中的 PREF_NAME 保持一致
     private static final XSharedPreferences sPrefs = new XSharedPreferences(MODULE_PACKAGE, "theme_config");
 
@@ -179,7 +177,9 @@ public class NinebotHook implements IXposedHookLoadPackage {
         tryHookMemoryConfig(loader);
         tryHookThemeUI(loader);
         tryHookEntry(loader);
+        tryHookDashboardAndHomeCards(loader);
         tryHookDeviceBeanVehicleType(loader);
+        tryHookTrackDetailDataObjects(loader);
         tryHookScreenCastOverlay(loader);
     }
 
@@ -479,6 +479,160 @@ public class NinebotHook implements IXposedHookLoadPackage {
         } catch (Throwable ignored) {}
     }
 
+    /**
+     * 仪表盘/首页卡片四层 hook：
+     * A) DeviceBeanExtKt.getConfig → forceType DynamicDeviceConfig
+     * B) createDynamicDeviceDetailPage → Motor Fragment
+     * B2) DynamicPageViewModel.<init> → 替换 deviceConfig
+     * C) NavigationViewController / RecentTrailViewHolder → serverId=116
+     */
+    private boolean hookedGetConfig = false;
+    private boolean hookedCreateDetailPage = false;
+    private boolean hookedDynamicPageVM = false;
+    private boolean hookedHomeNavCardCtor = false;
+    private boolean hookedHomeTrailCardCtor = false;
+    private void tryHookDashboardAndHomeCards(ClassLoader loader) {
+        try {
+            // A) hook DeviceBeanExtKt.getConfig → 返回 forceType 配置
+            Class<?> extKt = XposedHelpers.findClassIfExists(
+                    "cn.ninebot.device.dynamic.DeviceBeanExtKt", loader);
+            if (extKt != null && !hookedGetConfig) {
+                XposedBridge.hookAllMethods(extKt, "getConfig", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!isForceMotorDisplayEnabled()) return;
+                        if (param.args == null || param.args.length < 1 || param.args[0] == null) return;
+                        try {
+                            int forceType = getForceMotorVehicleType();
+                            Class<?> dcmClass = XposedHelpers.findClass(
+                                    "cn.ninebot.library.bluetooth.dynamic.DynamicConfigManager",
+                                    param.args[0].getClass().getClassLoader());
+                            Object dcmInstance = XposedHelpers.getStaticObjectField(dcmClass, "instance");
+                            if (dcmInstance != null) {
+                                Object config = XposedHelpers.callMethod(
+                                        dcmInstance, "getDeviceConfigWithServerId", forceType);
+                                param.setResult(config);
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                });
+                hookedGetConfig = true;
+                ReportHelper.report("车型判定", "HOOK_OK DeviceBeanExtKt.getConfig");
+            }
+
+            // B) hook createDynamicDeviceDetailPage → 用 forceType config 创建 Fragment
+            Class<?> fragKt = XposedHelpers.findClassIfExists(
+                    "cn.ninebot.device.dynamic.detail.DynamicDeviceDetailFragmentKt", loader);
+            if (fragKt != null && !hookedCreateDetailPage) {
+                XposedBridge.hookAllMethods(fragKt, "createDynamicDeviceDetailPage", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!isForceMotorDisplayEnabled()) return;
+                        if (param.args == null || param.args.length < 1 || param.args[0] == null) return;
+                        try {
+                            Object bean = param.args[0];
+                            int forceType = getForceMotorVehicleType();
+                            Class<?> dcmClass = XposedHelpers.findClass(
+                                    "cn.ninebot.library.bluetooth.dynamic.DynamicConfigManager",
+                                    bean.getClass().getClassLoader());
+                            Object dcmInstance = XposedHelpers.getStaticObjectField(dcmClass, "instance");
+                            if (dcmInstance == null) return;
+                            Object config = XposedHelpers.callMethod(
+                                    dcmInstance, "getDeviceConfigWithServerId", forceType);
+                            if (config == null) return;
+                            String modelName = (String) XposedHelpers.callMethod(config, "getModelIgnoreCase");
+                            Class<?> modelsClass = XposedHelpers.findClass(
+                                    "cn.ninebot.device.dynamic.config.DynamicDeviceModels", loader);
+                            Object companion = XposedHelpers.getStaticObjectField(modelsClass, "Companion");
+                            Object model = XposedHelpers.callMethod(companion, "findByName", modelName);
+                            Object fragment = XposedHelpers.callMethod(model, "createDetailUi", bean);
+                            param.setResult(fragment);
+                            ReportHelper.report("车型判定",
+                                    "DASHBOARD_FRAGMENT_FORCE model=" + modelName + " type=" + forceType);
+                        } catch (Throwable t) {
+                            ReportHelper.report("车型判定",
+                                    "DASHBOARD_FRAGMENT_FORCE 异常: " + t.getMessage());
+                        }
+                    }
+                });
+                hookedCreateDetailPage = true;
+                ReportHelper.report("车型判定", "HOOK_OK createDynamicDeviceDetailPage");
+            }
+
+            // B2) hook DynamicPageViewModel 构造函数 → 替换 deviceConfig 为 forceType config
+            Class<?> dpvmClass = XposedHelpers.findClassIfExists(
+                    "cn.ninebot.device.dynamic.DynamicPageViewModel", loader);
+            if (dpvmClass != null && !hookedDynamicPageVM) {
+                XposedBridge.hookAllConstructors(dpvmClass, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (!isForceMotorDisplayEnabled()) return;
+                        try {
+                            int forceType = getForceMotorVehicleType();
+                            ClassLoader cl = param.thisObject.getClass().getClassLoader();
+                            Class<?> dcmClass = XposedHelpers.findClass(
+                                    "cn.ninebot.library.bluetooth.dynamic.DynamicConfigManager", cl);
+                            Object dcmInstance = XposedHelpers.getStaticObjectField(dcmClass, "instance");
+                            if (dcmInstance == null) return;
+                            Object forceConfig = XposedHelpers.callMethod(
+                                    dcmInstance, "getDeviceConfigWithServerId", forceType);
+                            if (forceConfig == null) return;
+                            XposedHelpers.setObjectField(param.thisObject, "deviceConfig", forceConfig);
+                            ReportHelper.report("车型判定",
+                                    "DPVM_CONFIG_FORCE deviceConfig -> " + forceType);
+                        } catch (Throwable t) {
+                            ReportHelper.report("车型判定",
+                                    "DPVM_CONFIG_FORCE 异常: " + t.getMessage());
+                        }
+                    }
+                });
+                hookedDynamicPageVM = true;
+                ReportHelper.report("车型判定", "HOOK_OK DynamicPageViewModel.<init>");
+            }
+
+            // C) 首页卡片构造函数 → serverId=116
+            Class<?> navCard = XposedHelpers.findClassIfExists(
+                    "cn.ninebot.device.dynamic.viewHolder.NavigationViewController", loader);
+            if (navCard != null && !hookedHomeNavCardCtor) {
+                XposedBridge.hookAllConstructors(navCard, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!isForceMotorDisplayEnabled()) return;
+                        if (param.args != null && param.args.length >= 3 && param.args[2] instanceof Integer) {
+                            param.args[2] = 116;
+                            ReportHelper.report("车型判定", "HOME_NAV_CARD_FORCE serverId -> 116");
+                        }
+                    }
+                });
+                hookedHomeNavCardCtor = true;
+                ReportHelper.report("车型判定", "HOOK_OK NavigationViewController.<init>");
+            }
+
+            Class<?> trailCard = XposedHelpers.findClassIfExists(
+                    "cn.ninebot.device.dynamic.viewHolder.RecentTrailViewHolder", loader);
+            if (trailCard != null && !hookedHomeTrailCardCtor) {
+                XposedBridge.hookAllConstructors(trailCard, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!isForceMotorDisplayEnabled()) return;
+                        if (param.args != null && param.args.length >= 3 && param.args[2] instanceof Integer) {
+                            param.args[2] = 116;
+                            ReportHelper.report("车型判定", "HOME_TRAIL_CARD_FORCE serverId -> 116");
+                        }
+                    }
+                });
+                hookedHomeTrailCardCtor = true;
+                ReportHelper.report("车型判定", "HOOK_OK RecentTrailViewHolder.<init>");
+            }
+
+            if (hookedGetConfig && hookedCreateDetailPage && hookedDynamicPageVM && hookedHomeNavCardCtor && hookedHomeTrailCardCtor) {
+                ReportHelper.reportSync("注入成功", V("已挂载仪表盘四层hook+首页卡片修复"));
+            }
+        } catch (Throwable t) {
+            Log.e("NinebotHook/车型", "tryHookDashboardAndHomeCards 失败", t);
+        }
+    }
+
     // 5. 入口开启
     private boolean hookedEntry = false;
     private void tryHookEntry(ClassLoader loader) {
@@ -496,25 +650,16 @@ public class NinebotHook implements IXposedHookLoadPackage {
         } catch (Throwable ignored) {}
     }
 
-    // 修改车辆型号：仅影响仪表盘/轨迹等本地展示；上送仍用官方 116（DeviceBean 字段原值）
-    // 调用栈包含以下关键字时视为上送/网络，getVehicleType() 返回官方字段值（116）
-    private static final String[] UPLOAD_STACK_KEYWORDS = new String[]{
-            "retrofit", "okhttp3", "nbnet", "encrypt", "RequestBody", "ApiService", "Interceptor",
-            "network", "NeteaseEncrypt", "encodeContent", "RequestBuilder", "gson", "Gson", "toJson"
-    };
-    private static boolean isLikelyUploadOrNetwork() {
-        try {
-            StackTraceElement[] stack = Thread.currentThread().getStackTrace();
-            for (StackTraceElement e : stack) {
-                String c = e.getClassName();
-                if (c == null) continue;
-                String lower = c.toLowerCase();
-                for (String kw : UPLOAD_STACK_KEYWORDS) {
-                    if (lower.contains(kw.toLowerCase())) return true;
-                }
-            }
-        } catch (Throwable ignored) {}
-        return false;
+    private static int vehicleTypeLogCount = 0;
+    private static final int VEHICLE_TYPE_LOG_LIMIT = 5;
+
+    private static void logVehicleTypeDecision(String decision, int realType, int retType) {
+        if (vehicleTypeLogCount >= VEHICLE_TYPE_LOG_LIMIT) return;
+        vehicleTypeLogCount++;
+        String msg = decision + " real=" + realType + " ret=" + retType;
+        Log.w("NinebotHook/车型", msg);
+        // 同步到 Web 报表，便于不看 logcat 时定位“谁把类型改了”
+        ReportHelper.report("车型判定", msg);
     }
 
     private boolean hookedDeviceBeanVehicleType = false;
@@ -527,22 +672,147 @@ public class NinebotHook implements IXposedHookLoadPackage {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     if (!isForceMotorDisplayEnabled()) return;
-                    // 真实车型（官方 116 等）：从字段读取，上送/网络相关调用仍返回此值
                     int realType = 116;
                     try {
-                        realType = XposedHelpers.getIntField(param.thisObject, "vehicleType");
+                        Object ori = param.getResult();
+                        if (ori instanceof Integer) realType = (Integer) ori;
                     } catch (Throwable ignored) {}
-                    if (isLikelyUploadOrNetwork()) {
-                        param.setResult(Integer.valueOf(realType));
-                        return;
-                    }
-                    // 本地展示：仪表盘、轨迹等用配置的 type
-                    param.setResult(Integer.valueOf(getForceMotorVehicleType()));
+                    try {
+                        int fieldType = XposedHelpers.getIntField(param.thisObject, "vehicleType");
+                        if (realType <= 0 && fieldType > 0) realType = fieldType;
+                    } catch (Throwable ignored) {}
+                    if (realType <= 0) realType = 116;
+                    // V44 策略：一律返回 116（身份归属正确）
+                    // 仪表盘展示由 getConfig hook + TopGuide hook 独立处理
+                    param.setResult(Integer.valueOf(116));
+                    logVehicleTypeDecision("FORCE_116", realType, 116);
                 }
             });
             hookedDeviceBeanVehicleType = true;
-            ReportHelper.reportSync("注入成功", V("已挂载 DeviceBean.getVehicleType（修改车辆型号，上送仍用官方）"));
+            ReportHelper.reportSync("注入成功", V("已挂载 getVehicleType → 116"));
         } catch (Throwable ignored) {}
+    }
+
+
+    private static String rewriteTrackDetailType(String json, int displayType) {
+        if (json == null || json.isEmpty()) return json;
+        String changed = json
+                .replaceAll("\"vehicleType\"\\s*:\\s*-?\\d+", "\"vehicleType\":" + displayType)
+                .replaceAll("\"vehicle_type\"\\s*:\\s*-?\\d+", "\"vehicle_type\":" + displayType)
+                .replaceAll("\"hide_speed\"\\s*:\\s*true", "\"hide_speed\":false");
+        // 若详情数据里没有类型字段，则补一个展示字段，不影响原里程/轨迹/时间数据
+        if (!changed.contains("\"vehicleType\"") && changed.startsWith("{") && changed.endsWith("}")) {
+            changed = changed.substring(0, changed.length() - 1) + ",\"vehicleType\":" + displayType + ",\"hide_speed\":false}";
+        }
+        return changed;
+    }
+
+    /** 轨迹详情/分享：直接改数据对象，不改身份归属（116） */
+    private boolean hookedTrackResultCopy = false;
+    private boolean hookedTrackRnToRNPage = false;
+    private boolean hookedTrackPlayTrackNavigate = false;
+    private boolean hookedTrackDetailDataObjectsReported = false;
+    private void tryHookTrackDetailDataObjects(ClassLoader loader) {
+        try {
+            // 1) TrackResult.copy() -> RN 详情前的对象副本，直接写入展示 type
+            Class<?> trackResultClazz = XposedHelpers.findClassIfExists("com.ninebot.track.TrackResult", loader);
+            if (trackResultClazz != null && !hookedTrackResultCopy) {
+                XposedBridge.hookAllMethods(trackResultClazz, "copy", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (!isForceMotorDisplayEnabled()) return;
+                        Object copyObj = param.getResult();
+                        if (copyObj == null) return;
+                        int t = getForceMotorVehicleType();
+                        try { XposedHelpers.callMethod(copyObj, "setVehicleType", t); } catch (Throwable ignored) {}
+                        ReportHelper.report("轨迹详情", "TrackResult.copy 已写入展示 type=" + t);
+                    }
+                });
+                hookedTrackResultCopy = true;
+                ReportHelper.report("轨迹详情", "HOOK_OK TrackResult.copy");
+            }
+
+            // 2) RN 通用路由：module=Track 时，扫描 params 中所有 JSON 字符串并改展示字段
+            Class<?> rnClazz = XposedHelpers.findClassIfExists("cn.ninebot.react.RNProviderImpl", loader);
+            if (rnClazz != null && !hookedTrackRnToRNPage) {
+                XposedBridge.hookAllMethods(rnClazz, "toRNPage", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!isForceMotorDisplayEnabled()) return;
+                        if (param.args == null || param.args.length < 2) return;
+                        if (!(param.args[0] instanceof String) || !(param.args[1] instanceof Map)) return;
+                        String module = (String) param.args[0];
+                        if (!"Track".equals(module)) return;
+                        Map map = (Map) param.args[1];
+                        int t = getForceMotorVehicleType();
+                        String route = String.valueOf(map.get("route"));
+                        ReportHelper.report("轨迹详情", "toRNPage Track route=" + route + " keys=" + map.keySet());
+                        for (Object k : map.keySet().toArray()) {
+                            Object v = map.get(k);
+                            if (v instanceof String) {
+                                String s = (String) v;
+                                if (s.startsWith("{") && s.endsWith("}")) {
+                                    String changed = rewriteTrackDetailType(s, t);
+                                    if (!changed.equals(s)) {
+                                        map.put(k, changed);
+                                        ReportHelper.report("轨迹详情", "toRNPage Track 已改 JSON key=" + k);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+                XposedBridge.hookAllMethods(rnClazz, "toOtherTrackDetail", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!isForceMotorDisplayEnabled()) return;
+                        if (param.args == null || param.args.length < 1 || !(param.args[0] instanceof String)) return;
+                        String raw = (String) param.args[0];
+                        String changed = rewriteTrackDetailType(raw, getForceMotorVehicleType());
+                        if (!raw.equals(changed)) param.args[0] = changed;
+                    }
+                });
+                hookedTrackRnToRNPage = true;
+                ReportHelper.report("轨迹详情", "HOOK_OK RNProviderImpl.toRNPage+toOtherTrackDetail");
+            }
+
+            // 3) DevicePage.PLAY_TRACK.navigate：设备侧详情对象 MotorTrackDetail 直改 hideSpeed=false
+            Class<?> devicePageClazz = XposedHelpers.findClassIfExists("cn.ninebot.device.DevicePage", loader);
+            if (devicePageClazz != null) {
+                Object playTrackObj = null;
+                try { playTrackObj = XposedHelpers.getStaticObjectField(devicePageClazz, "PLAY_TRACK"); } catch (Throwable ignored) {}
+                if (playTrackObj != null && !hookedTrackPlayTrackNavigate) {
+                    Class<?> playTrackClazz = playTrackObj.getClass();
+                    XposedBridge.hookAllMethods(playTrackClazz, "navigate", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!isForceMotorDisplayEnabled()) return;
+                            if (param.args == null || param.args.length < 2) return;
+                            Object parameters = param.args[1];
+                            if (!(parameters instanceof String)) return;
+                            String raw = (String) parameters;
+                            int t = getForceMotorVehicleType();
+                            String changed = rewriteTrackDetailType(raw, t);
+                            if (!raw.equals(changed)) {
+                                param.args[1] = changed;
+                                ReportHelper.report("轨迹详情", "PLAY_TRACK.navigate 已改参数 JSON");
+                            }
+                        }
+                    });
+                    hookedTrackPlayTrackNavigate = true;
+                    ReportHelper.report("轨迹详情", "HOOK_OK DevicePage.PLAY_TRACK.navigate");
+                }
+            }
+            if (!hookedTrackDetailDataObjectsReported
+                    && hookedTrackResultCopy
+                    && hookedTrackRnToRNPage
+                    && hookedTrackPlayTrackNavigate) {
+                hookedTrackDetailDataObjectsReported = true;
+                ReportHelper.reportSync("注入成功", V("已挂载轨迹详情/分享数据对象层改写"));
+            }
+        } catch (Throwable t) {
+            Log.e("NinebotHook/轨迹详情", "tryHookTrackDetailDataObjects 失败", t);
+        }
     }
 
     /** 从解密后的 JSON 中提取车辆信息并上报，便于在 Web 日志中看到 vehicle_type、车辆编号等（vehicleType 为整数，通常 1～2 位） */
@@ -585,28 +855,41 @@ public class NinebotHook implements IXposedHookLoadPackage {
 
     private void injectInterceptor(XC_MethodHook.MethodHookParam param, ClassLoader loader) {
         try {
-            Object builder = param.args[0];
+                    Object builder = param.args[0];
             Class<?> interceptorClass = XposedHelpers.findClass("okhttp3.Interceptor", loader);
             Class<?> responseBodyClass = XposedHelpers.findClass("okhttp3.ResponseBody", loader);
             Object logger = Proxy.newProxyInstance(loader, new Class[]{interceptorClass}, (proxy, method, args) -> {
-                if (!"intercept".equals(method.getName())) return method.invoke(proxy, args);
-                Object chain = args[0];
-                Object request = XposedHelpers.callMethod(chain, "request");
+                            if (!"intercept".equals(method.getName())) return method.invoke(proxy, args);
+                            Object chain = args[0];
+                            Object request = XposedHelpers.callMethod(chain, "request");
                 String url = String.valueOf(XposedHelpers.callMethod(request, "url"));
-                Object response = XposedHelpers.callMethod(chain, "proceed", request);
-                Object body = XposedHelpers.callMethod(response, "body");
-                if (body != null) {
-                    String content = (String) XposedHelpers.callMethod(body, "string");
-                    ReportHelper.report("抓包", "【URL】" + url + " 抓取到加密包");
-                    Object contentType = XposedHelpers.callMethod(body, "contentType");
-                    Object newBody = XposedHelpers.callStaticMethod(responseBodyClass, "create", contentType, content);
-                    Object respBuilder = XposedHelpers.callMethod(response, "newBuilder");
-                    XposedHelpers.callMethod(respBuilder, "body", newBody);
-                    response = XposedHelpers.callMethod(respBuilder, "build");
+                Object response;
+                try {
+                    response = XposedHelpers.callMethod(chain, "proceed", request);
+                } catch (Throwable t) {
+                    // XposedHelpers 会把受检异常包装成 InvocationTargetError；解包后抛回给 OkHttp，避免崩溃
+                    Throwable cause = t.getCause();
+                    if (cause != null) throw cause;
+                    throw t;
                 }
-                return response;
-            });
-            XposedHelpers.callMethod(builder, "addInterceptor", logger);
+                Object body = XposedHelpers.callMethod(response, "body");
+                            if (body != null) {
+                                try {
+                                    String content = (String) XposedHelpers.callMethod(body, "string");
+                        ReportHelper.report("抓包", "【URL】" + url + " 抓取到加密包");
+                                    Object contentType = XposedHelpers.callMethod(body, "contentType");
+                        Object newBody = XposedHelpers.callStaticMethod(responseBodyClass, "create", contentType, content);
+                                    Object respBuilder = XposedHelpers.callMethod(response, "newBuilder");
+                                    XposedHelpers.callMethod(respBuilder, "body", newBody);
+                                    response = XposedHelpers.callMethod(respBuilder, "build");
+                                } catch (Throwable t) {
+                        // 某些请求在取消/重置时读取 body 会抛错；保持原响应返回，避免影响业务流程
+                        ReportHelper.report("抓包", "【URL】" + url + " 读取响应失败: " + t.getClass().getSimpleName());
+                                }
+                            }
+                            return response;
+                        });
+                        XposedHelpers.callMethod(builder, "addInterceptor", logger);
         } catch (Throwable ignored) {}
     }
 
@@ -792,13 +1075,18 @@ public class NinebotHook implements IXposedHookLoadPackage {
             if (root.findViewWithTag("ninebot_hook_watermark") != null) return;
             TextView tv = new TextView(activity);
             tv.setTag("ninebot_hook_watermark");
-            tv.setText("Hook v" + HOOK_LOG_VERSION);
-            tv.setAlpha(0.5f);
-            tv.setTextColor(Color.RED);
-            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
+            tv.setText("Hook成功 当前插件版本 " + HOOK_LOG_VERSION + "\n请注意：截图前请关闭 Hook 以防官方封堵插件");
+            tv.setAlpha(0.5f); // 50% 透明，不挡视线
+            tv.setTextColor(Color.WHITE);
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+            tv.setGravity(Gravity.CENTER);
+            tv.setShadowLayer(4f, 0f, 0f, Color.BLACK);
+            tv.setBackgroundColor(0x80000000); // 50% 透明黑底
+            tv.setPadding(dp(activity, 16), dp(activity, 12), dp(activity, 16), dp(activity, 12));
+            tv.setClickable(false);
+            tv.setFocusable(false); // 触摸穿透，不挡下方按钮
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, -2);
-            lp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
-            lp.topMargin = dp(activity, 10);
+            lp.gravity = Gravity.CENTER;
             root.addView(tv, lp);
         } catch (Throwable ignored) {}
     }

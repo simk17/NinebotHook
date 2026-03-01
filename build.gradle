@@ -10,10 +10,10 @@ android {
     }
     defaultConfig {
         applicationId "com.ninebot.hook"
-        minSdk 24
+        minSdk 24   // 保持 24 便于本机调试；LSPosed 官方支持 8.1~16，真机建议 8.1+
         targetSdk 34
-        versionCode 42
-        versionName "0.42"
+        versionCode 48
+        versionName "0.48"
     }
     buildTypes {
         release {
