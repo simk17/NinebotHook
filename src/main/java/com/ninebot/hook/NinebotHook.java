@@ -35,7 +35,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  */
 public class NinebotHook implements IXposedHookLoadPackage {
 
-    private static final int HOOK_LOG_VERSION = 48; 
+    private static final int HOOK_LOG_VERSION = 49; 
     private static String V(String msg) { return msg + " | 插件v" + HOOK_LOG_VERSION; }
 
     private static final String TARGET_PACKAGE = "cn.ninebot.ninebot";
@@ -559,14 +559,25 @@ public class NinebotHook implements IXposedHookLoadPackage {
                 ReportHelper.report("车型判定", "HOOK_OK createDynamicDeviceDetailPage");
             }
 
-            // B2) hook DynamicPageViewModel 构造函数 → 替换 deviceConfig 为 forceType config
+            // B2) hook DynamicPageViewModel：白名单——仅当 configName 为仪表盘所用时才替换；其余（更多设置/仪表设置/骑行模式等）保持 116
             Class<?> dpvmClass = XposedHelpers.findClassIfExists(
                     "cn.ninebot.device.dynamic.DynamicPageViewModel", loader);
             if (dpvmClass != null && !hookedDynamicPageVM) {
+                final java.util.Set<String> dashboardConfigWhitelist = new java.util.HashSet<>();
+                dashboardConfigWhitelist.add("device_ui_dashboard");
+                dashboardConfigWhitelist.add("device_ui_detail");
                 XposedBridge.hookAllConstructors(dpvmClass, new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
                         if (!isForceMotorDisplayEnabled()) return;
+                        String configName = (param.args != null && param.args.length >= 4 && param.args[3] instanceof String)
+                                ? (String) param.args[3] : null;
+                        boolean isDashboard = (configName == null || configName.isEmpty())
+                                || dashboardConfigWhitelist.contains(configName);
+                        if (!isDashboard) {
+                            ReportHelper.report("车型判定", "DPVM_SKIP 保持116 configName=" + configName);
+                            return;
+                        }
                         try {
                             int forceType = getForceMotorVehicleType();
                             ClassLoader cl = param.thisObject.getClass().getClassLoader();
@@ -579,7 +590,7 @@ public class NinebotHook implements IXposedHookLoadPackage {
                             if (forceConfig == null) return;
                             XposedHelpers.setObjectField(param.thisObject, "deviceConfig", forceConfig);
                             ReportHelper.report("车型判定",
-                                    "DPVM_CONFIG_FORCE deviceConfig -> " + forceType);
+                                    "DPVM_CONFIG_FORCE configName=" + configName + " -> " + forceType);
                         } catch (Throwable t) {
                             ReportHelper.report("车型判定",
                                     "DPVM_CONFIG_FORCE 异常: " + t.getMessage());
