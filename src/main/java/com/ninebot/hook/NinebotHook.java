@@ -35,7 +35,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  */
 public class NinebotHook implements IXposedHookLoadPackage {
 
-    private static final int HOOK_LOG_VERSION = 49; 
+    private static final int HOOK_LOG_VERSION = 51; 
     private static String V(String msg) { return msg + " | 插件v" + HOOK_LOG_VERSION; }
 
     private static final String TARGET_PACKAGE = "cn.ninebot.ninebot";
@@ -79,6 +79,57 @@ public class NinebotHook implements IXposedHookLoadPackage {
     private static boolean isScreenCastOverlayEnabled() {
         sPrefs.reload();
         return sPrefs.getBoolean("enable_screen_cast_overlay", false);
+    }
+
+    /** 取当前调用栈中含 ninebot 的帧（跳过 Xposed/VM），用于 getConfig 调试。 */
+    private static String getConfigStackHint(int maxFrames) {
+        try {
+            StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+            StringBuilder sb = new StringBuilder("stack=");
+            int count = 0;
+            for (int i = 0; i < stack.length && count < maxFrames; i++) {
+                StackTraceElement e = stack[i];
+                if (e == null) continue;
+                String cn = e.getClassName();
+                if (cn == null || !cn.contains("ninebot")) continue;
+                if (cn.contains("DeviceBeanExtKt") || cn.contains("NinebotHook")) continue;
+                if (count > 0) sb.append(" <- ");
+                sb.append(cn);
+                count++;
+            }
+            if (count == 0) sb.append("(无ninebot栈帧)");
+            return sb.toString();
+        } catch (Throwable ignored) {}
+        return "stack=?";
+    }
+
+    /** 为 true 时 getConfig 不替换，使用 116（导航设置高德+百度）。含：DynamicPageViewModel 构造链、导航/地图、仪表设置相关。 */
+    private static boolean isNaviOrMapConfigContext() {
+        try {
+            StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+            for (StackTraceElement e : stack) {
+                if (e == null) continue;
+                String cn = e.getClassName();
+                if (cn == null) continue;
+                // 来自 DynamicPageViewModel 构造链：该 ViewModel 用 116，仅 device_ui_dashboard 在 B2 里再被覆盖为 forceType
+                if (cn.contains("DynamicPageViewModel")) return true;
+                // 导航/地图：navi、screencast、mapcapture、map、navigation
+                if (cn.contains("navi") || cn.contains("Navi")
+                        || cn.contains("screencast") || cn.contains("ScreenCast")
+                        || cn.contains("mapcapture") || cn.contains("MapCapture")
+                        || (cn.contains("ninebot") && (cn.contains("map") || cn.contains("navigation")))) {
+                    return true;
+                }
+                // 更多功能→仪表设置→导航设置：set_dashboard、SetDashboard、device_ui_set、Settings 相关
+                if (cn.contains("set_dashboard") || cn.contains("SetDashboard") || cn.contains("device_ui_set")) {
+                    return true;
+                }
+                if (cn.contains("ninebot") && (cn.contains("Setting") || cn.contains("setting"))) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {}
+        return false;
     }
 
     private static String getRemoteServerUrl() {
@@ -142,6 +193,9 @@ public class NinebotHook implements IXposedHookLoadPackage {
                     } else if (name.contains("ninebot")) {
                         tryHookAll(loader);
                     }
+                    if (name != null && name.contains("okhttp3")) {
+                        tryHookOkHttpGlobal(loader);
+                    }
                 } catch (Throwable t) {
                     Log.w(TAG_SCREEN_CAST, "loadClass 回调异常", t);
                 }
@@ -173,6 +227,7 @@ public class NinebotHook implements IXposedHookLoadPackage {
 
     private synchronized void tryHookAll(ClassLoader loader) {
         tryHookRetrofit(loader);
+        tryHookOkHttpGlobal(loader);
         tryHookDecrypt(loader);
         tryHookMemoryConfig(loader);
         tryHookThemeUI(loader);
@@ -198,6 +253,32 @@ public class NinebotHook implements IXposedHookLoadPackage {
             });
             hookedRetrofit = true;
             ReportHelper.reportSync("注入成功", V("已挂载 Http 抓包拦截器"));
+        } catch (Throwable ignored) {}
+    }
+
+    // 1.1 全局抓包：hook OkHttp 请求链，记录所有 HTTP 请求（含不经过 RetrofitStrategy 的请求，便于排查更多功能/导航设置等）
+    private boolean hookedOkHttpGlobal = false;
+    private void tryHookOkHttpGlobal(ClassLoader loader) {
+        if (hookedOkHttpGlobal) return;
+        if (!isOtherEnabled()) return;
+        try {
+            Class<?> chainClass = XposedHelpers.findClassIfExists("okhttp3.internal.http.RealInterceptorChain", loader);
+            if (chainClass == null) chainClass = XposedHelpers.findClassIfExists("okhttp3.RealInterceptorChain", loader);
+            if (chainClass == null) return;
+            XposedBridge.hookAllMethods(chainClass, "proceed", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    if (param.args == null || param.args.length < 1) return;
+                    try {
+                        Object request = param.args[0];
+                        Object urlObj = XposedHelpers.callMethod(request, "url");
+                        String url = urlObj != null ? String.valueOf(XposedHelpers.callMethod(urlObj, "toString")) : "?";
+                        ReportHelper.report("抓包", "【请求】" + url);
+                    } catch (Throwable ignored) {}
+                }
+            });
+            hookedOkHttpGlobal = true;
+            ReportHelper.reportSync("注入成功", V("已挂载 OkHttp 全局抓包(所有请求)"));
         } catch (Throwable ignored) {}
     }
 
@@ -493,7 +574,7 @@ public class NinebotHook implements IXposedHookLoadPackage {
     private boolean hookedHomeTrailCardCtor = false;
     private void tryHookDashboardAndHomeCards(ClassLoader loader) {
         try {
-            // A) hook DeviceBeanExtKt.getConfig → 返回 forceType 配置
+            // A) hook DeviceBeanExtKt.getConfig → 多数场景返回 forceType（轨迹等电摩展示）；仅当调用来自 DynamicPageViewModel 构造链时不替换，用 116（导航设置高德+百度）。仪表盘再由 B2 覆盖 deviceConfig。
             Class<?> extKt = XposedHelpers.findClassIfExists(
                     "cn.ninebot.device.dynamic.DeviceBeanExtKt", loader);
             if (extKt != null && !hookedGetConfig) {
@@ -502,6 +583,16 @@ public class NinebotHook implements IXposedHookLoadPackage {
                     protected void beforeHookedMethod(MethodHookParam param) {
                         if (!isForceMotorDisplayEnabled()) return;
                         if (param.args == null || param.args.length < 1 || param.args[0] == null) return;
+                        // 来自 DynamicPageViewModel 构造链时不再替换；无法看到 ninebot 栈时（协程/子线程，如导航设置）也不替换，用 116 保留高德+百度
+                        boolean skipReplace = isNaviOrMapConfigContext();
+                        if (!skipReplace) {
+                            String stackHint = getConfigStackHint(3);
+                            if (stackHint != null && stackHint.contains("无ninebot栈帧")) skipReplace = true;
+                            if (isOtherEnabled()) ReportHelper.report("抓包", skipReplace ? "getConfig 未替换(116) " + stackHint : "getConfig 已替换(forceType) " + stackHint);
+                        } else if (isOtherEnabled()) {
+                            ReportHelper.report("抓包", "getConfig 未替换(116) " + getConfigStackHint(3));
+                        }
+                        if (skipReplace) return;
                         try {
                             int forceType = getForceMotorVehicleType();
                             Class<?> dcmClass = XposedHelpers.findClass(
@@ -559,32 +650,47 @@ public class NinebotHook implements IXposedHookLoadPackage {
                 ReportHelper.report("车型判定", "HOOK_OK createDynamicDeviceDetailPage");
             }
 
-            // B2) hook DynamicPageViewModel：白名单——仅当 configName 为仪表盘所用时才替换；其余（更多设置/仪表设置/骑行模式等）保持 116
+            // B2) hook DynamicPageViewModel：device_ui_dashboard 用 forceType；device_ui_set_dashboard 等导航/设置页强制用 116（高德+百度）
             Class<?> dpvmClass = XposedHelpers.findClassIfExists(
                     "cn.ninebot.device.dynamic.DynamicPageViewModel", loader);
             if (dpvmClass != null && !hookedDynamicPageVM) {
                 final java.util.Set<String> dashboardConfigWhitelist = new java.util.HashSet<>();
                 dashboardConfigWhitelist.add("device_ui_dashboard");
-                dashboardConfigWhitelist.add("device_ui_detail");
                 XposedBridge.hookAllConstructors(dpvmClass, new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
-                        if (!isForceMotorDisplayEnabled()) return;
                         String configName = (param.args != null && param.args.length >= 4 && param.args[3] instanceof String)
                                 ? (String) param.args[3] : null;
-                        boolean isDashboard = (configName == null || configName.isEmpty())
-                                || dashboardConfigWhitelist.contains(configName);
-                        if (!isDashboard) {
-                            ReportHelper.report("车型判定", "DPVM_SKIP 保持116 configName=" + configName);
-                            return;
-                        }
+                        if (isOtherEnabled()) ReportHelper.report("抓包", "【DPVM】configName=" + (configName != null ? configName : "null"));
+                        if (!isForceMotorDisplayEnabled()) return;
                         try {
-                            int forceType = getForceMotorVehicleType();
                             ClassLoader cl = param.thisObject.getClass().getClassLoader();
                             Class<?> dcmClass = XposedHelpers.findClass(
                                     "cn.ninebot.library.bluetooth.dynamic.DynamicConfigManager", cl);
                             Object dcmInstance = XposedHelpers.getStaticObjectField(dcmClass, "instance");
                             if (dcmInstance == null) return;
+
+                            // 导航设置入口：更多功能(device_ui_settings)→仪表设置(device_ui_set_dashboard)→导航设置。这些页强制用 116，否则地图切换不显示
+                            boolean isNaviOrSettingsPage = (configName != null && !configName.isEmpty()) && (
+                                    "device_ui_settings".equals(configName) || "device_ui_set_dashboard".equals(configName)
+                                    || configName.toLowerCase().contains("navi") || configName.toLowerCase().contains("map")
+                                    || configName.toLowerCase().contains("navigation"));
+                            if (isNaviOrSettingsPage) {
+                                Object config116 = XposedHelpers.callMethod(dcmInstance, "getDeviceConfigWithServerId", 116);
+                                if (config116 != null) {
+                                    XposedHelpers.setObjectField(param.thisObject, "deviceConfig", config116);
+                                    ReportHelper.report("车型判定", "DPVM_FORCE_116 导航/设置 configName=" + configName);
+                                }
+                                return;
+                            }
+
+                            boolean isDashboard = (configName == null || configName.isEmpty())
+                                    || dashboardConfigWhitelist.contains(configName);
+                            if (!isDashboard) {
+                                ReportHelper.report("车型判定", "DPVM_SKIP 保持116 configName=" + configName);
+                                return;
+                            }
+                            int forceType = getForceMotorVehicleType();
                             Object forceConfig = XposedHelpers.callMethod(
                                     dcmInstance, "getDeviceConfigWithServerId", forceType);
                             if (forceConfig == null) return;
@@ -593,7 +699,7 @@ public class NinebotHook implements IXposedHookLoadPackage {
                                     "DPVM_CONFIG_FORCE configName=" + configName + " -> " + forceType);
                         } catch (Throwable t) {
                             ReportHelper.report("车型判定",
-                                    "DPVM_CONFIG_FORCE 异常: " + t.getMessage());
+                                    "DPVM 异常: " + t.getMessage());
                         }
                     }
                 });

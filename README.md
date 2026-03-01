@@ -38,5 +38,7 @@ LSPosed/Xposed 模块，为九号出行（cn.ninebot.ninebot）提供主题、�
 
 ## 版本
 
-- 插件逻辑版本：v49（`HOOK_LOG_VERSION`）。
-- 构建版本：见 `build.gradle` 中 `versionCode` / `versionName`。
+- 插件逻辑版本：v51（`HOOK_LOG_VERSION`）。
+- 构建版本：见 `build.gradle` 中 `versionCode` / `versionName`（当前 51 / 0.51）。
+
+**v51 更新摘要**：修复「更多功能→仪表设置→导航设置」中高德/百度地图切换不显示的问题（getConfig 在无 ninebot 栈及导航/设置相关场景不替换，DPVM 对设置页强制 116）；抓包增强（OkHttp 全局请求记录、DPVM configName 与 getConfig 栈日志）。
