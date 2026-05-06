@@ -35,12 +35,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        ReportHelper.setContext(getApplicationContext());
         requestStorageIfNeeded();
 
         try {
-            int pid = android.os.Process.myPid();
-            ReportHelper.reportSync("应用", "九号出行LSPosed插件已打开 | PID=" + pid);
+            // 保留：打开插件时的调试日志（logcat）
         } catch (Throwable t) { }
 
         int pad = dp(PADDING_DP);
@@ -124,7 +122,7 @@ public class MainActivity extends Activity {
                 cardPad
         ));
         TextView motorTypeHint = new TextView(this);
-        motorTypeHint.setText("该值（建议填 116 或抓包「车辆信息」中确认的车型。乱填可能会触发内部开发功能：如 117 会触发「发起导航(体验版)」「仅支持高德自行车」等");
+        motorTypeHint.setText("当前测试电摩型号为14101\n该值（建议填 116 或抓包「车辆信息」中确认的车型。乱填可能会触发内部开发功能：如 117 会触发「发起导航(体验版)」「仅支持高德自行车」等");
         motorTypeHint.setTextSize(BODY_SIZE_SP - 2);
         motorTypeHint.setTextColor(COLOR_SUBTITLE);
         motorTypeHint.setPadding(cardPad, dp(8), cardPad, dp(4));
@@ -149,22 +147,77 @@ public class MainActivity extends Activity {
                 cardPad
         ));
 
-        // ---------- 服务器配置 ----------
-        root.addView(sectionTitle("Web 日志服务器"));
-        TextView hint = new TextView(this);
-        hint.setText("IP:端口（如 192.168.1.100:8765）");
-        hint.setTextSize(BODY_SIZE_SP - 2);
-        hint.setTextColor(COLOR_SUBTITLE);
-        hint.setPadding(cardPad, cardPad, cardPad, dp(4));
-        root.addView(hint);
+        // ---------- 7. 自定义投屏 ----------
+        root.addView(sectionTitle("7. 自定义投屏"));
+        root.addView(switchRow(
+                "启用自定义投屏（完全接管投屏逻辑，使用自定义画面源）",
+                HookConfig.isCustomScreenCastEnabled(this),
+                (checked) -> {
+                    HookConfig.setCustomScreenCastEnabled(this, checked);
+                    Toast.makeText(this, checked ? "已启用自定义投屏" : "已禁用自定义投屏", Toast.LENGTH_SHORT).show();
+                },
+                cardPad
+        ));
+        
+        // 分辨率配置
+        LinearLayout resLayout = new LinearLayout(this);
+        resLayout.setOrientation(LinearLayout.HORIZONTAL);
+        resLayout.setPadding(cardPad, dp(8), cardPad, dp(8));
+        
+        EditText editWidth = new EditText(this);
+        editWidth.setHint("宽度");
+        editWidth.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        editWidth.setText(String.valueOf(HookConfig.getScreenCastWidth(this)));
+        editWidth.setTextSize(BODY_SIZE_SP);
+        editWidth.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1f));
+        
+        TextView xText = new TextView(this);
+        xText.setText(" × ");
+        xText.setTextSize(BODY_SIZE_SP);
+        xText.setPadding(dp(8), 0, dp(8), 0);
+        
+        EditText editHeight = new EditText(this);
+        editHeight.setHint("高度");
+        editHeight.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        editHeight.setText(String.valueOf(HookConfig.getScreenCastHeight(this)));
+        editHeight.setTextSize(BODY_SIZE_SP);
+        editHeight.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1f));
+        
+        resLayout.addView(editWidth);
+        resLayout.addView(xText);
+        resLayout.addView(editHeight);
+        root.addView(resLayout);
+        
+        // 码率帧率配置
+        LinearLayout bitrateLayout = new LinearLayout(this);
+        bitrateLayout.setOrientation(LinearLayout.HORIZONTAL);
+        bitrateLayout.setPadding(cardPad, dp(8), cardPad, dp(8));
+        
+        EditText editBitrate = new EditText(this);
+        editBitrate.setHint("码率 (bps)");
+        editBitrate.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        editBitrate.setText(String.valueOf(HookConfig.getScreenCastBitrate(this)));
+        editBitrate.setTextSize(BODY_SIZE_SP);
+        editBitrate.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1f));
+        
+        TextView fpsText = new TextView(this);
+        fpsText.setText(" FPS: ");
+        fpsText.setTextSize(BODY_SIZE_SP);
+        fpsText.setPadding(dp(8), 0, dp(8), 0);
+        
+        EditText editFps = new EditText(this);
+        editFps.setHint("帧率");
+        editFps.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        editFps.setText(String.valueOf(HookConfig.getScreenCastFramerate(this)));
+        editFps.setTextSize(BODY_SIZE_SP);
+        editFps.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1f));
+        
+        bitrateLayout.addView(editBitrate);
+        bitrateLayout.addView(fpsText);
+        bitrateLayout.addView(editFps);
+        root.addView(bitrateLayout);
 
-        EditText editUrl = new EditText(this);
-        editUrl.setHint("192.168.1.100:8765");
-        editUrl.setText(HookConfig.getServerUrl(this));
-        editUrl.setPadding(cardPad, dp(8), cardPad, dp(8));
-        editUrl.setTextSize(BODY_SIZE_SP);
-        root.addView(editUrl);
-
+        // ---------- 保存设置 ----------
         Button btnSave = new Button(this);
         btnSave.setText("保存设置");
         btnSave.setTextColor(Color.WHITE);
@@ -176,12 +229,30 @@ public class MainActivity extends Activity {
         saveLp.topMargin = dp(12);
         btnSave.setLayoutParams(saveLp);
         btnSave.setOnClickListener(v -> {
-            String s = editUrl.getText().toString().trim();
-            HookConfig.setServerUrl(this, s);
             try {
                 int type = Integer.parseInt(editMotorType.getText().toString().trim());
                 HookConfig.setForceMotorVehicleType(this, type);
             } catch (NumberFormatException ignored) { }
+            
+            // 保存自定义投屏配置
+            try {
+                int width = Integer.parseInt(editWidth.getText().toString().trim());
+                int height = Integer.parseInt(editHeight.getText().toString().trim());
+                int bitrate = Integer.parseInt(editBitrate.getText().toString().trim());
+                int framerate = Integer.parseInt(editFps.getText().toString().trim());
+                
+                if (width > 0 && height > 0) {
+                    HookConfig.setScreenCastWidth(this, width);
+                    HookConfig.setScreenCastHeight(this, height);
+                }
+                if (bitrate > 0) {
+                    HookConfig.setScreenCastBitrate(this, bitrate);
+                }
+                if (framerate > 0) {
+                    HookConfig.setScreenCastFramerate(this, framerate);
+                }
+            } catch (NumberFormatException ignored) { }
+            
             Toast.makeText(this, "设置已保存，下次 Hook 生效", Toast.LENGTH_SHORT).show();
         });
         root.addView(btnSave);

@@ -107,4 +107,70 @@ public class HookConfig {
     public static void setScreenCastOverlayEnabled(Context context, boolean enabled) {
         getPrefs(context).edit().putBoolean(KEY_SCREEN_CAST_OVERLAY, enabled).apply();
     }
+
+    /** 6. 自定义投屏：完全接管投屏逻辑，使用自定义画面源 */
+    public static final String KEY_ENABLE_CUSTOM_SCREENCAST = "enable_custom_screencast";
+    
+    /** 自定义投屏源：0=系统屏幕, 1=导航叠加, 2=自定义视图 */
+    public static final String KEY_CUSTOM_SCREENCAST_SOURCE = "custom_screencast_source";
+    
+    /** 自定义投屏分辨率宽度 */
+    public static final String KEY_SCREENCAST_WIDTH = "screencast_width";
+    
+    /** 自定义投屏分辨率高度 */
+    public static final String KEY_SCREENCAST_HEIGHT = "screencast_height";
+    
+    /** 自定义投屏码率 (bps) */
+    public static final String KEY_SCREENCAST_BITRATE = "screencast_bitrate";
+    
+    /** 自定义投屏帧率 */
+    public static final String KEY_SCREENCAST_FRAMERATE = "screencast_framerate";
+
+    public static boolean isCustomScreenCastEnabled(Context context) {
+        return getPrefs(context).getBoolean(KEY_ENABLE_CUSTOM_SCREENCAST, false);
+    }
+
+    public static void setCustomScreenCastEnabled(Context context, boolean enabled) {
+        getPrefs(context).edit().putBoolean(KEY_ENABLE_CUSTOM_SCREENCAST, enabled).apply();
+    }
+
+    public static int getCustomScreenCastSource(Context context) {
+        return getPrefs(context).getInt(KEY_CUSTOM_SCREENCAST_SOURCE, 0);
+    }
+
+    public static void setCustomScreenCastSource(Context context, int source) {
+        getPrefs(context).edit().putInt(KEY_CUSTOM_SCREENCAST_SOURCE, source).apply();
+    }
+
+    public static int getScreenCastWidth(Context context) {
+        return getPrefs(context).getInt(KEY_SCREENCAST_WIDTH, 800);
+    }
+
+    public static void setScreenCastWidth(Context context, int width) {
+        getPrefs(context).edit().putInt(KEY_SCREENCAST_WIDTH, width).apply();
+    }
+
+    public static int getScreenCastHeight(Context context) {
+        return getPrefs(context).getInt(KEY_SCREENCAST_HEIGHT, 480);
+    }
+
+    public static void setScreenCastHeight(Context context, int height) {
+        getPrefs(context).edit().putInt(KEY_SCREENCAST_HEIGHT, height).apply();
+    }
+
+    public static int getScreenCastBitrate(Context context) {
+        return getPrefs(context).getInt(KEY_SCREENCAST_BITRATE, 2000000);
+    }
+
+    public static void setScreenCastBitrate(Context context, int bitrate) {
+        getPrefs(context).edit().putInt(KEY_SCREENCAST_BITRATE, bitrate).apply();
+    }
+
+    public static int getScreenCastFramerate(Context context) {
+        return getPrefs(context).getInt(KEY_SCREENCAST_FRAMERATE, 30);
+    }
+
+    public static void setScreenCastFramerate(Context context, int framerate) {
+        getPrefs(context).edit().putInt(KEY_SCREENCAST_FRAMERATE, framerate).apply();
+    }
 }
